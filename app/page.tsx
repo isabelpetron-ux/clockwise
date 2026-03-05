@@ -65,16 +65,20 @@ function safeParseJSON(s: string | null) {
   }
 }
 
-function timeToMinutes(t) {
+function timeToMinutes(t: string | undefined | null): number {
+  if (!t) return 0; // or throw new Error("Missing time")
   const [hh, mm] = t.split(":").map(Number);
-  return hh * 60 + mm;
+  return hh * 60 + (mm ?? 0);
 }
 
-function clamp(n, a, b) {
-  return Math.max(a, Math.min(b, n));
+function clamp<T>(n: T, a: T, b: T): T {
+  return (n < a ? a : n > b ? b : n);
 }
 
-function overlapMinutes([a1, a2], [b1, b2]) {
+function overlapMinutes(
+  [a1, a2]: [number, number],
+  [b1, b2]: [number, number]
+): number {
   const s = Math.max(a1, b1);
   const e = Math.min(a2, b2);
   return Math.max(0, e - s);
@@ -763,7 +767,6 @@ async function runAiCourseRecommend() {
     const data = raw ? JSON.parse(raw) : {};
     const sectionRecs = Array.isArray(data.courseRecommendations) ? data.courseRecommendations : [];
 
-    const courseCards = buildCourseLevelRecommendations(sectionRecs, chronotypeKey);
     setAiCourseRecs(courseCards);
   } catch (e: any) {
     setAiCourseError(e?.message || "AI course recommend failed");
