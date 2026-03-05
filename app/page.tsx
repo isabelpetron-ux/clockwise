@@ -198,7 +198,7 @@ const CHRONO_RESULTS = {
   },
 } as const;
 
-function strainLabel(v) {
+function strainLabel(v: number) {
   if (v >= 30) return { label: "Aligned", tone: "good" };
   if (v >= -10) return { label: "Mixed", tone: "warn" };
   return { label: "Strain", tone: "bad" };
