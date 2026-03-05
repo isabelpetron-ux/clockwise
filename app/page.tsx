@@ -243,7 +243,9 @@ function alignmentContext(score: number, chronotypeKey: string, hasEarlyBlock: b
   return { headline, body, tips };
 }
 
-function toneBadge(tone) {
+type Tone = "good" | "warn" | "bad";
+
+function toneBadge(tone: Tone): string {
   switch (tone) {
     case "good":
       return "bg-emerald-600 text-emerald-950";
@@ -767,7 +769,7 @@ async function runAiCourseRecommend() {
     const data = raw ? JSON.parse(raw) : {};
     const sectionRecs = Array.isArray(data.courseRecommendations) ? data.courseRecommendations : [];
 
-    setAiCourseRecs(courseCards);
+    setAiCourseRecs(buildCourseLevelRecommendations(sectionRecs, chronotypeKey));
   } catch (e: any) {
     setAiCourseError(e?.message || "AI course recommend failed");
     setAiCourseRecs([]);
