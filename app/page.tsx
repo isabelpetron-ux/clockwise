@@ -1,5 +1,14 @@
 'use client'
 
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+  CartesianGrid,
+} from "recharts";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -51,6 +60,52 @@ const DAYS = ["M", "T", "W", "Th", "F", "Sa", "Su"];
 const GRID_START = 0; // 0:00
 const GRID_END = 24; // 24:00
 
+type ChronotypeKey = keyof typeof CHRONOTYPES;
+
+type Meeting = {
+  days: string[];
+  start: string;
+  end: string;
+};
+
+type Course = {
+  id: string;
+  dept: string;
+  number: string;
+  title?: string;
+  instructor?: string;
+  dist?: string;
+  periodRaw?: string;
+  meetings?: Meeting[];
+};
+
+type Activity = {
+  id: string;
+  category: string;
+  name: string;
+  days: string[];
+  start: string;
+  end: string;
+};
+
+type ScheduleItem =
+  | {
+      id: string;
+      kind: "course";
+      day: string;
+      start: string;
+      end: string;
+      course: Course;
+    }
+  | {
+      id: string;
+      kind: "activity";
+      day: string;
+      start: string;
+      end: string;
+      activity: Activity;
+    };
+
 // -----------------------------
 // Helpers
 // -----------------------------
@@ -71,8 +126,8 @@ function timeToMinutes(t: string | undefined | null): number {
   return hh * 60 + (mm ?? 0);
 }
 
-function clamp<T>(n: T, a: T, b: T): T {
-  return (n < a ? a : n > b ? b : n);
+function clamp(n: number, a: number, b: number): number {
+  return n < a ? a : n > b ? b : n;
 }
 
 function overlapMinutes(
@@ -258,19 +313,49 @@ function toneBadge(tone: Tone): string {
   }
 }
 
-function blockStrainMinutes(startMin, endMin, chronotypeKey) {
+type Assignment = {
+  id: string;
+  title: string;
+  course?: string;
+  dueDate: string;        // ISO date: "2026-04-07"
+  estimatedHours: number; // e.g., 6
+  kind?: "exam" | "paper" | "pset" | "reading" | "project" | "other";
+};
+
+type WeeklyForecastRow = {
+  weekStart: string;      // ISO date Monday
+  weekLabel: string;      // e.g. "Apr 6"
+  totalHours: number;
+  items: Assignment[];
+};
+
+type StudyPlan = {
+  title: string;
+  insights: {
+    title: string;
+    body: string;
+  }[];
+};
+
+function blockStrainMinutes(
+  startMin: number,
+  endMin: number,
+  chronotypeKey: keyof typeof CHRONOTYPES
+): number {
   const c = CHRONOTYPES[chronotypeKey];
-  const block = [startMin, endMin];
+  const block: [number, number] = [startMin, endMin];
+
   const peak = overlapMinutes(block, c.windows.peak);
   const mod = overlapMinutes(block, c.windows.moderate);
   const caution = overlapMinutes(block, c.windows.caution);
+
   let score = peak * 1.0 + mod * 0.5 - caution * 1.0;
   const duration = endMin - startMin;
   const norm = duration > 0 ? (score / duration) * 100 : 0;
   return clamp(norm, -100, 100);
 }
 
-function courseStrain(course, chronotypeKey) {
+function courseStrain(course: any, chronotypeKey: keyof typeof CHRONOTYPES) {
   const meetings = course.meetings || [];
   if (!meetings.length) return 0;
 
@@ -291,7 +376,7 @@ function courseStrain(course, chronotypeKey) {
   return clamp(avg, -100, 100);
 }
 
-function activityStrain(activity, chronotypeKey) {
+function activityStrain(activity: any, chronotypeKey: keyof typeof CHRONOTYPES) {
   const start = timeToMinutes(activity.start);
   const end = timeToMinutes(activity.end);
   const base = blockStrainMinutes(start, end, chronotypeKey);
@@ -315,7 +400,7 @@ function emptyLine() {
   return { id: String(Date.now()) + Math.random().toString(16).slice(2), value: "" };
 }
 
-function formatDays(days) {
+function formatDays(days: string[] | undefined) {
   if (!days?.length) return "(no days)";
   return days.join("/");
 }
@@ -329,7 +414,61 @@ function formatTime12(t: string) {
   return `${hour}:${String(mm).padStart(2, "0")} ${period}`;
 }
 
-function hourRangeLabel(start, end) {
+function isoDateOnly(d: Date) {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function startOfWeekMonday(dateISO: string) {
+  const d = new Date(`${dateISO}T00:00:00`);
+  const day = d.getDay(); // 0 Sun ... 6 Sat
+  const diff = (day === 0 ? -6 : 1 - day); // move to Monday
+  d.setDate(d.getDate() + diff);
+  return isoDateOnly(d);
+}
+
+function shortWeekLabel(weekStartISO: string) {
+  const d = new Date(`${weekStartISO}T00:00:00`);
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function buildWeeklyForecast(items: Assignment[]): WeeklyForecastRow[] {
+  const map = new Map<string, Assignment[]>();
+
+  for (const a of items) {
+    if (!a?.dueDate) continue;
+    const wk = startOfWeekMonday(a.dueDate);
+    const arr = map.get(wk) || [];
+    arr.push(a);
+    map.set(wk, arr);
+  }
+
+  const weeks = Array.from(map.entries())
+    .map(([weekStart, items]) => {
+      const totalHours = items.reduce((sum, it) => sum + (Number(it.estimatedHours) || 0), 0);
+      items.sort((x, y) => (x.dueDate || "").localeCompare(y.dueDate || ""));
+      return {
+        weekStart,
+        weekLabel: shortWeekLabel(weekStart),
+        totalHours,
+        items,
+      };
+    })
+    .sort((a, b) => a.weekStart.localeCompare(b.weekStart));
+
+  return weeks;
+}
+
+function workloadTone(hours: number): Tone {
+  if (hours >= 18) return "bad";
+  if (hours >= 10) return "warn";
+  return "good";
+}
+
+
+function hourRangeLabel(start: string, end: string) {
   return `${start}–${end}`;
 }
 
@@ -339,7 +478,7 @@ function formatHour12(hour24: number) {
   return `${h}:00 ${ampm}`;
 }
 
-function meetingSummary(course) {
+function meetingSummary(course: any) {
   const ms = course.meetings || [];
   if (!ms.length) return "Arrange";
   const first = ms[0];
@@ -357,7 +496,7 @@ function courseKey(c: any) {
 
 function buildCourseLevelRecommendations(
   sectionRecs: any[],
-  chronotypeKey: string
+  chronotypeKey: keyof typeof CHRONOTYPES
 ) {
   // sectionRecs items should look like:
   // { section: <course-like object>, explanation?: string }
@@ -422,7 +561,7 @@ function buildCourseLevelRecommendations(
   return courseCards;
 }
 
-function meetingDaysUnion(course) {
+function meetingDaysUnion(course: any) {
   const ms = course.meetings || [];
   const set = new Set();
   for (const m of ms) for (const d of m.days || []) set.add(d);
@@ -511,7 +650,15 @@ function parsePeriodRaw(periodRaw: string) {
 // Mini schedule grid
 // -----------------------------
 
-function Grid({ chronotypeKey, itemsByDay, onRemove }) {
+function Grid({
+  chronotypeKey,
+  itemsByDay,
+  onRemove,
+}: {
+  chronotypeKey: keyof typeof CHRONOTYPES;
+  itemsByDay: Record<string, any[]>;
+  onRemove: (item: any) => void;
+}) {
   return (
   <div className="rounded-2xl border border-emerald-900 bg-background">
     {/* Sticky day header row */}
@@ -619,12 +766,14 @@ export default function ChronotypeResponsiveRegistrarMock() {
   const [tab, setTab] = useState("intake");
 
     const navTabs = [
-    { key: "intake", label: "Intake" },
+    { key: "intake", label: "Chronotype Quiz" },
     { key: "result", label: "Result" },
     { key: "profile", label: "Profile" },
-    { key: "catalog", label: "Catalog" },
-    { key: "schedule", label: "Schedule" },
+    { key: "catalog", label: "Course Catalog" },
+    { key: "schedule", label: "Weekly Schedule" },
+    { key: "term", label: "Term Planner" },
     { key: "summary", label: "Summary" },
+   
   ];
 
   const [catalogDraft, setCatalogDraft] = useState("");
@@ -644,10 +793,25 @@ export default function ChronotypeResponsiveRegistrarMock() {
 >([]);
   const [aiGeneralLoading, setAiGeneralLoading] = useState(false);
   const [aiGeneralError, setAiGeneralError] = useState<string | null>(null);
-  
+  const [assignments, setAssignments] = useState<Assignment[]>([]);
+  const [syllabusLoading, setSyllabusLoading] = useState(false);
+  const [syllabusError, setSyllabusError] = useState<string | null>(null);
+
+  const [syllabusPdf, setSyllabusPdf] = useState<File | null>(null);
+  const [pdfUploadError, setPdfUploadError] = useState<string | null>(null);
+
+  const [weeklyForecast, setWeeklyForecast] = useState<WeeklyForecastRow[]>([]);
+  const [studyPlan, setStudyPlan] = useState<StudyPlan | null>(null);
+  const [studyPlanLoading, setStudyPlanLoading] = useState(false);
+  const [studyPlanError, setStudyPlanError] = useState<string | null>(null);
+
+  const [termInsights, setTermInsights] = useState<any[]>([]);
+  const [termInsightsLoading, setTermInsightsLoading] = useState(false);
+  const [termInsightsError, setTermInsightsError] = useState<string | null>(null);
 
 
-  async function applyCatalogSearch(next?: string) {
+
+    async function applyCatalogSearch(next?: string) {
     const q = (typeof next === "string" ? next : catalogDraft).trim();
     setCatalogQuery(q);
     setCatalogPage(0);
@@ -680,6 +844,163 @@ export default function ChronotypeResponsiveRegistrarMock() {
     } finally {
       setCatalogLoading(false);
     }
+}
+
+
+async function parseSyllabusFromPdf() {
+  setSyllabusLoading(true);
+  setSyllabusError(null);
+
+  try {
+    if (!syllabusPdf) {
+      setPdfUploadError("Please upload a PDF first.");
+      return;
+    }
+
+    const form = new FormData();
+    form.append("file", syllabusPdf);
+
+    const res = await fetch("/api/syllabus-pdf", {
+      method: "POST",
+      body: form,
+    });
+
+    const raw = await res.text();
+    const contentType = res.headers.get("content-type") || "";
+
+    if (!res.ok) {
+      throw new Error(
+        contentType.includes("application/json")
+          ? raw || `API error (${res.status})`
+          : `API error (${res.status}). Check /api/syllabus-pdf server logs.`
+      );
+    }
+
+    const data = raw ? JSON.parse(raw) : {};
+    const parsed: Assignment[] = Array.isArray(data.assignments) ? data.assignments : [];
+
+    const cleaned = parsed
+      .filter((a) => a?.title && a?.dueDate)
+      .map((a) => ({
+        id: a.id || `${a.title}-${a.dueDate}-${Math.random().toString(16).slice(2)}`,
+        title: String(a.title),
+        course: a.course ? String(a.course) : undefined,
+        dueDate: String(a.dueDate).slice(0, 10),
+        estimatedHours: Number(a.estimatedHours) || 0,
+        kind: a.kind || "other",
+      }));
+
+    const forecast = buildWeeklyForecast(cleaned);
+
+    setAssignments(cleaned);
+    setWeeklyForecast(forecast);
+
+    if (!cleaned.length) {
+  setSyllabusError("I couldn't detect major assignments in this PDF.");
+}
+  } catch (e: any) {
+    setSyllabusError(e?.message || "Failed to parse syllabus PDF");
+    setAssignments([]);
+    setWeeklyForecast([]);
+  } finally {
+    setSyllabusLoading(false);
+  }
+}
+
+async function generateTermInsights() {
+  if (!assignments.length) {
+    setTermInsightsError("Extract assignments first.");
+    return;
+  }
+
+  setTermInsightsLoading(true);
+  setTermInsightsError(null);
+
+  try {
+    const forecast = weeklyForecast.length
+      ? weeklyForecast
+      : buildWeeklyForecast(assignments);
+
+    const payload = {
+      chronotypeKey,
+      profile,
+      assignments,
+      weeklyForecast: forecast,
+      alignment: {
+        score: overallMetrics.combined,
+        diagnostics: alignmentDiagnostics?.bullets || [],
+      },
+    };
+
+    const res = await fetch("/api/term-insights", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    const contentType = res.headers.get("content-type") || "";
+    const raw = await res.text();
+
+    if (!res.ok || !contentType.includes("application/json")) {
+      throw new Error(
+        `API error (${res.status}). Expected JSON but got: ${raw.slice(0, 200)}`
+      );
+    }
+
+    const data = raw ? JSON.parse(raw) : {};
+    setTermInsights(Array.isArray(data.insights) ? data.insights : []);
+  } catch (e: any) {
+    setTermInsightsError(e?.message || "Failed to generate term insights");
+    setTermInsights([]);
+  } finally {
+    setTermInsightsLoading(false);
+  }
+}
+
+
+async function generateWeeklyStudyPlan() {
+  if (!assignments.length) {
+    setStudyPlanError("Extract assignments first.");
+    return;
+  }
+
+  setStudyPlanLoading(true);
+  setStudyPlanError(null);
+
+  try {
+    const forecast = weeklyForecast.length
+      ? weeklyForecast
+      : buildWeeklyForecast(assignments);
+
+    const payload = {
+      chronotypeKey,
+      profile,
+      weeklyForecast: forecast,
+      assignments,
+      alignment: {
+        score: overallMetrics.combined,
+        diagnostics: alignmentDiagnostics?.bullets || [],
+      },
+      chronotypeWindows: CHRONOTYPES[chronotypeKey]?.windows,
+    };
+
+    const res = await fetch("/api/studyplan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    const raw = await res.text();
+    if (!res.ok) throw new Error(raw || `API error (${res.status})`);
+
+    const data = raw ? JSON.parse(raw) : null;
+    setStudyPlan(data);
+  } catch (e: any) {
+    setStudyPlanError(e?.message || "Failed to generate study plan");
+    setStudyPlan(null);
+  } finally {
+    setStudyPlanLoading(false);
+  }
 }
 
 async function runAiScheduleSupport() {
@@ -1109,7 +1430,11 @@ const alignmentInfo = alignmentContext(
   chronotypeKey,
   hasEarlyBlock
 );
-function classifyBlock(startMin: number, endMin: number, chronotypeKey: string) {
+function classifyBlock(
+  startMin: number,
+  endMin: number,
+  chronotypeKey: keyof typeof CHRONOTYPES
+) {
   const c = CHRONOTYPES[chronotypeKey];
   const block: [number, number] = [startMin, endMin];
 
@@ -1128,7 +1453,7 @@ function classifyBlock(startMin: number, endMin: number, chronotypeKey: string) 
 function diagnoseAlignment(
   scheduleCourseItems: any[],
   scheduleActivityItems: any[],
-  chronotypeKey: string
+  chronotypeKey: keyof typeof CHRONOTYPES
 ) {
   const blocks = [...scheduleCourseItems, ...scheduleActivityItems].map((b) => {
     const startMin = timeToMinutes(b.start);
@@ -1237,7 +1562,7 @@ function diagnoseAlignment(
   return { headline, bullets, stats: { peak: peakBlocks.length, caution: cautionBlocks.length } };
 }
 
-  function removeFromSchedule(item) {
+function removeFromSchedule(item: any) {
   if (item.kind === "course") {
     setSelectedSections((prev) => prev.filter((c) => c.id !== item.course.id));
   } else {
@@ -1265,6 +1590,35 @@ function diagnoseAlignment(
     setProfileCompleted(true);
     setProfileMode("view");
     setTab("profile");
+  }
+
+    function resetProfile(mode: "profile-only" | "full" = "profile-only") {
+    // 1) reset profile-related state
+    setProfile({
+      name: "",
+      majors: [emptyLine()],
+      minors: [emptyLine()],
+      activities: [emptyActivity()],
+    });
+    setProfileCompleted(false);
+    setProfileMode("edit");
+
+    // 2) optionally reset everything (chronotype intake + schedule selections)
+    if (mode === "full") {
+      setSelectedSections([]);
+      setIntakeAnswers({});
+      setChronotypeKey("Intermediate");
+      setTab("intake");
+    } else {
+      setTab("profile");
+    }
+
+    // 3) clear localStorage so it doesn't immediately restore old profile
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // ignore
+    }
   }
 
   const recommendations = useMemo(() => {
@@ -1634,13 +1988,26 @@ function diagnoseAlignment(
                             <CheckCircle2 className="h-5 w-5" />
                             <div className="text-lg font-semibold">Profile Overview</div>
                           </div>
-                          <Button
-                            variant="outline"
-                            className="rounded-2xl bg-white text-black"
-                            onClick={() => setProfileMode("edit")}
-                          >
-                            <Pencil className="h-4 w-4 mr-2" /> Edit
-                          </Button>
+                        <div className="flex items-center gap-2">
+  <Button
+    variant="outline"
+    className="rounded-2xl bg-white text-black"
+    onClick={() => setProfileMode("edit")}
+  >
+    <Pencil className="h-4 w-4 mr-2" /> Edit
+  </Button>
+
+  <Button
+    variant="outline"
+    className="rounded-2xl bg-white text-black"
+    onClick={() => {
+      const ok = window.confirm("Start a new profile? This will erase your current profile info.");
+      if (ok) resetProfile("profile-only");
+    }}
+  >
+    Make a new profile
+  </Button>
+</div>
                         </div>
 
                         <div className="grid md:grid-cols-3 gap-3">
@@ -2008,12 +2375,38 @@ function diagnoseAlignment(
                         Back to result
                       </Button>
                     </div>
+
+                    <Button
+                    variant="outline"
+                    className="rounded-2xl bg-white text-black"
+                    onClick={() => {
+                      const ok = window.confirm("Clear this profile and start over?");
+                      if (ok) resetProfile("profile-only");
+                    }}
+                  >
+                    Start over
+                  </Button>
                   </>
+                  
                 )}
+                
+                <Button
+                  variant="outline"
+                  className="rounded-2xl bg-white text-black"
+                  onClick={() => {
+                    const ok = window.confirm("Reset everything (profile, schedule, and intake)?");
+                    if (ok) resetProfile("full");
+                  }}
+                >
+                  Reset everything
+                </Button>
+
               </CardContent>
             </Card>
           </div>
         )}
+
+
 
 {/* CATALOG */}
 {tab === "catalog" && (
@@ -2249,6 +2642,336 @@ function diagnoseAlignment(
           </div>
         )}
 
+        {/* TERM */}
+{/* TERM */}
+{tab === "term" && (
+  <div className="space-y-4">
+    <Card className="rounded-2xl border-emerald-900">
+      <CardContent className="p-6 space-y-3">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-xl font-semibold">Term workload forecast</div>
+            <div className="text-sm text-muted-foreground">
+              Upload a syllabus PDF and I’ll extract major assignments, estimate workload, and forecast high-strain weeks.
+            </div>
+          </div>
+          <Badge variant="outline" className="rounded-full border-emerald-700 text-emerald-50">
+            Prototype
+          </Badge>
+        </div>
+
+        <div className="space-y-2">
+  <div className="text-xs text-muted-foreground">Upload syllabus PDF</div>
+
+  <input
+    type="file"
+    accept="application/pdf"
+    onChange={(e) => {
+      const f = e.target.files?.[0] || null;
+
+      if (f && f.type !== "application/pdf") {
+        setSyllabusPdf(null);
+        setPdfUploadError("Please upload a PDF file only.");
+        return;
+      }
+
+      setSyllabusPdf(f);
+      setPdfUploadError(null);
+    }}
+  />
+
+  <div className="flex flex-wrap gap-2">
+    <Button
+      variant="outline"
+      className="rounded-2xl bg-white text-black"
+      onClick={() => {
+        if (!syllabusPdf) {
+          setPdfUploadError("Please choose a PDF first.");
+          return;
+        }
+        setPdfUploadError(null);
+      }}
+      disabled={!syllabusPdf}
+    >
+      Import PDF
+    </Button>
+
+    <Button
+      className="rounded-2xl bg-emerald-600 text-emerald-950 hover:bg-emerald-500"
+      onClick={parseSyllabusFromPdf}
+      disabled={syllabusLoading || !syllabusPdf}
+    >
+      Extract assignments
+    </Button>
+
+    <Button
+      variant="outline"
+      className="rounded-2xl bg-white text-black"
+      onClick={() => {
+        setSyllabusPdf(null);
+        setAssignments([]);
+        setWeeklyForecast([]);
+        setStudyPlan(null);
+        setTermInsights([]);
+        setSyllabusError(null);
+        setStudyPlanError(null);
+        setTermInsightsError(null);
+        setPdfUploadError(null);
+      }}
+    >
+      Clear
+    </Button>
+  </div>
+
+  {syllabusPdf ? (
+    <div className="text-sm text-muted-foreground">
+      Selected file: <span className="font-medium">{syllabusPdf.name}</span>
+    </div>
+  ) : null}
+
+  {pdfUploadError ? (
+    <div className="text-sm text-red-300">{pdfUploadError}</div>
+  ) : null}
+</div>
+
+<Card className="rounded-2xl border-emerald-900">
+  <CardContent className="p-6 space-y-3">
+    <div className="flex items-center justify-between">
+      <div>
+        <div className="text-sm font-semibold">Extracted assignments</div>
+        <div className="text-xs text-muted-foreground">
+          Major due dates pulled from your syllabus PDF.
+        </div>
+      </div>
+
+      <Badge
+        variant="outline"
+        className="rounded-full border-emerald-700 text-emerald-50"
+      >
+        {assignments.length} items
+      </Badge>
+    </div>
+
+    {assignments.length ? (
+      <div className="space-y-2">
+        {assignments.map((a) => (
+          <div
+            key={a.id}
+            className="rounded-2xl border border-emerald-900 p-3"
+          >
+            <div className="text-sm font-medium">{a.title}</div>
+            <div className="text-xs text-muted-foreground mt-1">
+              Due {a.dueDate}
+              {a.kind ? ` • ${a.kind}` : ""}
+              {a.estimatedHours ? ` • ~${a.estimatedHours}h` : ""}
+            </div>
+          </div>
+        ))}
+      </div>
+    ) : (
+      <div className="text-sm text-muted-foreground">
+        No assignments extracted yet.
+      </div>
+    )}
+  </CardContent>
+</Card>
+
+        {syllabusError ? (
+          <div className="text-sm text-red-300">Error: {syllabusError}</div>
+        ) : null}
+
+        {syllabusLoading ? (
+          <div className="text-sm text-muted-foreground">Parsing syllabus PDF…</div>
+        ) : null}
+      </CardContent>
+    </Card>
+
+        <Card className="rounded-2xl border-emerald-900">
+      <CardContent className="p-6 space-y-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-sm font-semibold">AI term planner</div>
+            <div className="text-xs text-muted-foreground">
+              Strategic advice for pacing your workload across the term.
+            </div>
+          </div>
+
+          <Button
+            variant="outline"
+            className="rounded-2xl bg-white text-black"
+            onClick={generateTermInsights}
+            disabled={!assignments.length || termInsightsLoading}
+          >
+            Generate insights
+          </Button>
+        </div>
+
+        {termInsightsLoading && (
+          <div className="text-sm text-muted-foreground">AI analyzing your term...</div>
+        )}
+
+        {termInsightsError && (
+          <div className="text-sm text-red-300">{termInsightsError}</div>
+        )}
+
+        {!!termInsights.length && (
+          <div className="space-y-3">
+            {termInsights.map((r, i) => (
+              <div key={i} className="rounded-2xl border border-emerald-900 p-4">
+                <div className="text-sm font-semibold">{r.title}</div>
+                <div className="text-sm text-muted-foreground mt-1">{r.body}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+
+    <Card className="rounded-2xl border-emerald-900">
+      <CardContent className="p-6 space-y-3">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold">Weekly forecast</div>
+            <div className="text-xs text-muted-foreground">
+              Estimated total hours of major deliverables due each week.
+            </div>
+          </div>
+          <Badge variant="outline" className="rounded-full border-emerald-700 text-emerald-50">
+            {weeklyForecast.length ? `${weeklyForecast.length} weeks` : "No data yet"}
+          </Badge>
+        </div>
+
+        {weeklyForecast.length ? (
+        <div className="space-y-3">
+          {weeklyForecast.map((w) => (
+            <div key={w.weekStart} className="rounded-2xl border border-emerald-900 p-4">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <div className="text-sm font-semibold">Week of {w.weekLabel}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {w.items.length} major item{w.items.length === 1 ? "" : "s"}
+                  </div>
+                </div>
+
+                <Badge className={`rounded-full ${toneBadge(workloadTone(w.totalHours))}`}>
+                  {w.totalHours >= 18
+                    ? "High strain"
+                    : w.totalHours >= 10
+                    ? "Moderate"
+                    : "Light"}
+                </Badge>
+              </div>
+
+              <div className="mt-3 space-y-2">
+                {w.items.map((a) => (
+                  <div
+                    key={a.id}
+                    className="rounded-xl border border-emerald-900 px-3 py-2"
+                  >
+                    <div className="text-sm font-medium">{a.title}</div>
+                    <div className="text-xs text-muted-foreground mt-1">
+                      Due {a.dueDate}
+                      {a.course ? ` • ${a.course}` : ""}
+                      {a.kind ? ` • ${a.kind}` : ""}
+                      {a.estimatedHours ? ` • ~${a.estimatedHours}h` : ""}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="text-sm text-muted-foreground">
+          Upload a syllabus PDF and click “Extract assignments” to see your term plan.
+        </div>
+      )}
+      </CardContent>
+    </Card>
+
+    <Card className="rounded-2xl border-emerald-900">
+      <CardContent className="p-6 space-y-3">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold">AI Study Strategy</div>
+            <div className="text-xs text-muted-foreground">
+              Generates a week-by-week plan that respects your chronotype and upcoming deadlines.
+            </div>
+          </div>
+
+          <Button
+            variant="outline"
+            className="rounded-2xl bg-white text-black"
+            onClick={generateWeeklyStudyPlan}
+            disabled={!assignments.length || studyPlanLoading}
+          >
+            Generate plan
+          </Button>
+        </div>
+
+        {studyPlanError ? (
+          <div className="text-sm text-red-300">AI Error: {studyPlanError}</div>
+        ) : null}
+
+        {studyPlanLoading ? (
+          <div className="text-sm text-muted-foreground">AI thinking…</div>
+        ) : null}
+
+        {!!weeklyForecast.length && (
+          <div className="space-y-3">
+            {weeklyForecast.slice(0, 10).map((w) => (
+              <div key={w.weekStart} className="rounded-2xl border border-emerald-900 p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-sm font-semibold">Week of {w.weekLabel}</div>
+                  <Badge className={`rounded-full ${toneBadge(workloadTone(w.totalHours))}`}>
+                    {Math.round(w.totalHours)}h
+                  </Badge>
+                </div>
+
+                <div className="mt-2 space-y-1">
+                  {w.items.slice(0, 6).map((a) => (
+                    <div key={a.id} className="text-sm text-muted-foreground">
+                      • {a.title} {a.course ? `(${a.course})` : ""} — due {a.dueDate} — ~{a.estimatedHours}h
+                    </div>
+                  ))}
+                  {w.items.length > 6 ? (
+                    <div className="text-xs text-muted-foreground">
+                      + {w.items.length - 6} more
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {studyPlan?.insights?.length ? (
+  <div className="space-y-3">
+    {studyPlan.insights.map((item, i) => (
+      <div
+        key={i}
+        className="rounded-2xl border border-emerald-900 p-4"
+      >
+        <div className="text-sm font-semibold">{item.title}</div>
+        <div className="text-sm text-muted-foreground mt-1">
+          {item.body}
+        </div>
+      </div>
+    ))}
+  </div>
+) : (
+  <div className="text-sm text-muted-foreground">
+    {weeklyForecast.length
+      ? "Click “Generate plan” to get AI study insights."
+      : "Extract assignments first."}
+  </div>
+)}
+      </CardContent>
+    </Card>
+  </div>
+  
+)}
+
         {/* SUMMARY */}
         {tab === "summary" && (
           <div className="space-y-4">
@@ -2433,7 +3156,7 @@ function diagnoseAlignment(
                 </Card>
 
                 <div className="space-y-3">
-                  <div className="text-sm font-semibold">Lifestyle suggestions to support your schedule</div>
+                  <div className="text-sm font-semibold">Get started: Lifestyle suggestions</div>
                   <div className="grid md:grid-cols-2 gap-2">
                     {recommendations.lifestyle.map((s, idx) => (
                       <div key={idx} className="rounded-2xl border border-emerald-900 p-4">
